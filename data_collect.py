@@ -4,7 +4,6 @@ from datetime import datetime
 import asyncio
 from hashlib import md5
 from typing import Union, List, Tuple, Dict, Any
-sys.path.append('/home/noah/projects/cvInfra/src')
 
 import cv2
 import numpy as np
@@ -14,19 +13,15 @@ from user_agents import parse
 from qcloud_cos import CosConfig
 from qcloud_cos import CosS3Client
 
+
+from app.stitching_v2.lib.stitch import ml_stitch_im_video
+from app.stitching_v2.lib.nn import ExtrMatcher, OrtMatcher, OrtFeatureExtractor
+
+
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-
-os.environ["COS_SECRET_ID"] = ""
-os.environ["COS_SECRET_KEY"] = ""
-
-os.environ["WEB_DEMO"] = "True" # local testing
 
 secret_id = os.environ['COS_SECRET_ID']
 secret_key = os.environ['COS_SECRET_KEY']
-
-
-from app.stitching_v2.lib.stitch import main_stitching, ml_stitch_im_video
-from app.stitching_v2.lib.nn import ExtrMatcher, OrtMatcher, OrtFeatureExtractor
 
 
 meta_data = {
@@ -109,12 +104,12 @@ class NN_Model:
         # resolution = "640x360"
         self.extractor = OrtFeatureExtractor(
             providers=['CPUExecutionProvider'],
-            model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/xfeat_{n_kpts}_{resolution}.onnx")
+            model_path=f"/src/app/stitching_v2/lib/weights/onnx/xfeat_{n_kpts}_{resolution}.onnx")
             # model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/superpoint.onnx")
         self.matcher = OrtMatcher(
             providers=['CPUExecutionProvider'],
             score_threshold=0.7,
-            model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/lighterglue_L3.onnx")
+            model_path=f"/src/app/stitching_v2/lib/weights/onnx/lighterglue_L3.onnx")
             # model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/superpoint_lightglue.onnx")
 
 
@@ -336,12 +331,12 @@ def info_search(user_name: str, selected_date: str, request: gr.Request):
     template = template = gr.Dropdown([], label="选择日期", interactive=True, visible=False, value=None)
 
     if user_name == "":
-        gr.Warning(msg_info, title="错误", duration=2)
+        gr.Warning(msg_info)
         return [], "", template
 
     try:
         msg_info = f"正在查询 {user_name} 的拼图结果"
-        gr.Info(msg_info, title="查询", duration=2)
+        gr.Info(msg_info)
         res = s3client.list_objects(user_name)
 
         ## no result
@@ -385,7 +380,7 @@ def info_search(user_name: str, selected_date: str, request: gr.Request):
 
 def process_video(files: list, user_name: str, request: gr.Request, progress=gr.Progress()):
     if not user_name:
-        gr.Warning("请输入邮箱!", title="错误", duration=2)
+        gr.Warning("请输入邮箱!")
         return [], "请输入邮箱"
 
     if not files:
@@ -428,7 +423,7 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
 
     final_text = f"已完成 {len(results)}/{total} 个视频处理"
     progress(1.0, desc=final_text)
-    gr.Info(final_text, title="完成", duration=2)
+    gr.Info(final_text)
     browser_info = get_user_info(request)
     s3client.meta_data.update({
         'user_name': user_name,
@@ -442,7 +437,7 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
 
 def upload_video(files: list, user_name: str, progress=gr.Progress()):
     if user_name == "":
-        gr.Warning("请输入邮箱", title="错误", duration=2)
+        gr.Warning("请输入邮箱")
         return [], "请输入邮箱"
 
     if not files:
@@ -468,7 +463,7 @@ def upload_video(files: list, user_name: str, progress=gr.Progress()):
 
     info_update = f"上传完成！共上传 {total} 个文件"
     progress(1, desc=info_update)
-    gr.Info(info_update, title="完成", duration=2)
+    gr.Info(info_update)
 
     s3client.meta_data.update({
         'user_name': user_name,
@@ -535,4 +530,4 @@ with gr.Blocks(
 
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(share=True, server_name="0.0.0.0", server_port=8080)
+    demo.launch(share=True, server_name="0.0.0.0", server_port=7878)
