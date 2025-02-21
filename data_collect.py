@@ -1,13 +1,14 @@
-import io, sys, os, time, random, logging
+import io, sys, os, time, random, logging, json
+from dataclasses import dataclass
+from datetime import datetime
 import asyncio
 from hashlib import md5
-from typing import Union, List, Tuple
+from typing import Union, List, Tuple, Dict, Any
 sys.path.append('/home/noah/projects/cvInfra/src')
 
 import cv2
 import numpy as np
 import gradio as gr
-from faker import Faker
 from user_agents import parse
 
 from qcloud_cos import CosConfig
@@ -28,6 +29,77 @@ from app.stitching_v2.lib.stitch import main_stitching, ml_stitch_im_video
 from app.stitching_v2.lib.nn import ExtrMatcher, OrtMatcher, OrtFeatureExtractor
 
 
+meta_data = {
+    'version':              '2025.02.21',                           # update version
+    'description':          'stitching video',                      # update description
+    'group':                'retail',
+    'task':                 'stitching',
+    'platform':             'gradio',                               # collect data from gradio(web)
+    #### USER
+    'user_name':            '',
+    'device':               '',
+    'browser':              '',
+    'os':                   '',
+    #### DATETIME
+    'datetime':             '',
+    #### MD5
+    'md5':                  '',
+    #### VIDEO
+    'video_url':            [],
+    'video_res':            [],
+    'video_duration':       [],
+    #### STITCHING RESULT
+    'image_url':            [],
+    'image_res':            [],
+    #### ML
+    'extractor': {
+        'model':            'onnx',
+        'name':             'xfeat',
+        'n_kpts':           2048,
+        'resolution':       '1280x720',
+    },
+    'matcher': {
+        'model':            'onnx',
+        'name':             'lighterglue(L3)',
+        'score_threshold':  0.7,
+    },
+    #### STORAGE
+    'storage':              'qcloud_cos',
+    'bucket':               'videostitch-demo-1304042378',
+    'region':               'ap-shanghai',
+    #### OTHER
+    'memo':                 'demo test',
+    'user_rate':            '',                                     # user rate, check if the image is useful
+}
+
+# dataclass MetaData, init via given dict
+class MetaData:
+    def __init__(self, data=meta_data):
+        for key, value in data.items():
+            setattr(self, key, value)
+
+    def __str__(self):
+        return str(self.__dict__)
+
+    def __repr__(self):
+        return str(self.__dict__)
+
+    def update(self, key, value=None):
+        if isinstance(key, dict):
+            for k, v in key.items():
+                setattr(self, k, v)
+        else:
+            setattr(self, key, value)
+        return self
+
+    def get(self, key):
+        return getattr(self, key, None)
+
+    def to_json(self):
+        logging.debug(f"Metadata: {self.__dict__}")
+        return json.dumps(self.__dict__)
+
+
 class NN_Model:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -38,10 +110,12 @@ class NN_Model:
         self.extractor = OrtFeatureExtractor(
             providers=['CPUExecutionProvider'],
             model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/xfeat_{n_kpts}_{resolution}.onnx")
+            # model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/superpoint.onnx")
         self.matcher = OrtMatcher(
             providers=['CPUExecutionProvider'],
             score_threshold=0.7,
             model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/lighterglue_L3.onnx")
+            # model_path=f"/home/noah/projects/cvInfra/src/app/stitching_v2/lib/weights/onnx/superpoint_lightglue.onnx")
 
 
 class S3_Client:
@@ -49,26 +123,62 @@ class S3_Client:
         config = CosConfig(Region='ap-shanghai', SecretId=secret_id, SecretKey=secret_key, Token=None, Scheme='https')
         self.client = CosS3Client(config)
         self.region = "ap-shanghai"
-        self.bucket = "retail-dev-cn-1304042378"
-        self.video_prefix = "stitchv2/videos"
-        self.pano_prefix = "stitchv2/panos"
+        self.bucket = "videostitch-demo-1304042378"
+        self.video_prefix = "videos"
+        self.image_prefix = "images"
+        self.json_prefix = "jsons"
+        self.meta_data = MetaData()
         # download path prefix
         self.end_point = f"https://{self.bucket}.cos.{self.region}.myqcloud.com"
         # 404 image
-        self.no_image = f"{self.end_point}/stitchv2/no_image.jpg"
+        self.no_image = f"{self.end_point}/no_image.jpg"
 
     def get_url(self, user_name: str, md5_key: str):
-        key = f"{self.pano_prefix}/{self.user_name(user_name)}/{self.get_datetime()}/{md5_key}.png"
+        key = f"{self.image_prefix}/{self.user_name(user_name)}/{self.get_datetime()}/{md5_key}.png"
         if self._is_exit(key):
             return f"{self.end_point}/{key}"
         else:
             return ""
 
+    def _is_exit(self, key):
+        response = self.client.object_exists(
+            Bucket=self.bucket,
+            Key=key,
+        )
+        return response
+
+    def upload_metadata(self, user_name: str):
+        meta_data = self.meta_data
+        md5_key = meta_data.get('md5')
+        if md5_key == '':
+            logging.error("MD5 key is missing.")
+            md5_key = "{}_{}".format(user_name, self.get_timestamp())
+
+        meta_data.update({
+            'md5': md5_key,
+            'user_name': user_name,
+            'datetime': self.get_timestamp(),
+        })
+
+        key = f"{self.json_prefix}/{md5_key}.json"
+        response = self.client.put_object(
+            Bucket=self.bucket,
+            Body=meta_data.to_json(),
+            Key=key,
+        )
+        if 'ETag' in response:
+            logging.info(f"Metadata {key} uploaded successfully.")
+            return response['ETag']
+        else:
+            logging.error(f"Failed to upload metadata {key}")
+
+        return response
+
     def upload_npimg(self, m_img: np.ndarray, user_name: str, md5_key: str):
         m_img = cv2.cvtColor(m_img, cv2.COLOR_BGRA2RGB)
         to_upload_img = io.BytesIO(cv2.imencode('.png', m_img)[1]).getvalue()
 
-        key = f"{self.pano_prefix}/{self.user_name(user_name)}/{self.get_datetime()}/{md5_key}.png"
+        key = f"{self.image_prefix}/{self.user_name(user_name)}/{self.get_datetime()}/{md5_key}.png"
         if self._is_exit(key):
             logging.info(f"File {key} already exists.")
             return
@@ -78,57 +188,75 @@ class S3_Client:
             Body=to_upload_img,
             Key=key,
         )
+        im_url = ""
         if 'ETag' in response:
             logging.info(f"Image {key} uploaded successfully.")
-            return response['ETag']
+            im_url = f"{self.end_point}/{key}"
         else:
             logging.error(f"Failed to upload image {key}")
 
-        return response
+        return im_url
 
-    def upload_file(self, file_path: str, user_name: str, md5_key: str=None):
-        if md5_key is None:
-            md5_key = self.get_md5(file_path)
+    def upload_file(self, file_path: str, user_name: str, md5_key: str = None) -> str:
+        """Upload a video file to S3 storage.
+        
+        Args:
+            file_path: Path to the video file
+            user_name: User name/email 
+            md5_key: Optional MD5 hash key for the file
+            
+        Returns:
+            str: URL of uploaded file if successful, empty string otherwise
+        """
+        # Validate inputs
+        if not os.path.exists(file_path):
+            logging.error(f"File not found: {file_path}")
+            return ""
 
-        filename, ext = os.path.splitext(os.path.basename(file_path))
-        md5_path = f"{md5_key}{ext}"
+        if not self.is_video(file_path):
+            logging.error(f"Invalid video format: {file_path}")
+            return ""
 
-        key = f"{self.video_prefix}/{self.user_name(user_name)}/{self.get_datetime()}/{md5_path}"
-        if self._is_exit(key):
-            logging.info(f"File {key} already exists.")
-            return
+        try:
+            # Generate key path
+            md5_key = md5_key or self.get_md5(file_path)
+            _, ext = os.path.splitext(file_path)
+            key = f"{self.video_prefix}/{self.user_name(user_name)}/{self.get_datetime()}/{md5_key}{ext}"
 
-        response = self.client.upload_file(
-            Bucket=self.bucket,
-            LocalFilePath=file_path,
-            Key=key,
-            PartSize=1,
-            MAXThread=10,
-            EnableMD5=False, # skip md5 check
-        )
-        if 'ETag' in response:
-            logging.info(f"Video {key} uploaded successfully.")
-            # gr.Info(f"Video {filename} uploaded successfully.")
-            return response['ETag']
-        else:
-            # gr.Error(f"Failed to upload video {filename}")
-            logging.error(f"Failed to upload video {key}")
+            # Check if file already exists
+            if self._is_exit(key):
+                logging.info(f"File already exists: {key}")
+                return f"{self.end_point}/{key}"
 
-        return response
+            # Upload file
+            response = self.client.upload_file(
+                Bucket=self.bucket,
+                LocalFilePath=file_path,
+                Key=key,
+                PartSize=1,
+                MAXThread=10,
+                EnableMD5=False
+            )
 
-    def _is_exit(self, key):
-        response = self.client.object_exists(
-            Bucket=self.bucket,
-            Key=key,
-        )
-        return response
+            if 'ETag' in response:
+                url = f"{self.end_point}/{key}"
+                logging.info(f"Upload successful: {url}")
+                return url
 
-    def list_objects(self, user_name: str):
+            logging.error(f"Upload failed - no ETag in response")
+            return ""
+
+        except Exception as e:
+            logging.exception(f"Upload failed: {str(e)}")
+            return ""
+
+    def list_objects(self, user_name: str) -> List[str]:
         # filter space and special characters, keep only letters and numbers
         user_name = self.user_name(user_name)
+        logging.info("Check prefix: {}".format(f'{self.image_prefix}/{user_name}/'))
         response = self.client.list_objects(
             Bucket=self.bucket,
-            Prefix=f'{self.pano_prefix}/{user_name}/',
+            Prefix=f'{self.image_prefix}/{user_name}/',
         )
         # get image list
         im_dict = {}
@@ -148,16 +276,11 @@ class S3_Client:
                 print(im_link)
                 img_list.append(im_link)
 
-        if len(img_list) == 0:
-            logging.info(f"No images found. User: {user_name}")
-            logging.info(f"no image: {self.no_image}")
-            img_list.append(self.no_image)
-
         return img_list
 
     @staticmethod
     def user_name(user_name: str):
-        return ''.join(e for e in user_name if e.isalnum())
+        return ''.join(e for e in user_name if e.isalnum() or e == '.')
 
     @staticmethod
     def get_md5(fname: str) -> str:
@@ -167,95 +290,165 @@ class S3_Client:
         return md5_hash
 
     @staticmethod
-    def get_user_info(request: gr.Request):
-        user_agent = request.headers.get("User-Agent", "")
-        user_agent_info = parse(user_agent)
-        info = {
-            "browser": {
-                "family": user_agent_info.browser.family,
-                "version": user_agent_info.browser.version_string
-            },
-            "device": user_agent_info.device.family,
-            "os": {
-                "family": user_agent_info.os.family,
-                "version": user_agent_info.os.version_string
-            }
-        }
-        return str(info)
-
-    @staticmethod
     def get_datetime():
         return time.strftime("%Y%m%d", time.localtime())
 
+    @staticmethod
+    def get_video_info(video_path: str):
+        cap = cv2.VideoCapture(video_path)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        cap.release()
+        return {
+            'width': width,
+            'height': height,
+            'duration': duration,
+            'fps': fps
+        }
 
-def get_random_name():
-    faker = Faker(locale=['it_IT', 'en_US'])
-    _name = faker.name().split()[0].lower()
-    return ''.join(e for e in _name if e.isalnum())
+    @staticmethod
+    def is_video(video_path: str):
+        return video_path.endswith(('.mp4', '.mov'))
+
+    @staticmethod
+    def get_timestamp():
+        return time.strftime("%Y%m%d%H%M%S", time.localtime())
 
 
-def info_search(user_name: str):
+def get_user_info(request: gr.Request):
+    user_agent = request.headers.get("User-Agent")
+    user_agent_info = parse(user_agent)
+    info = {
+        "browser": user_agent_info.browser.family,
+        "device": user_agent_info.device.family,
+        "os": user_agent_info.os.family,
+    }
+    logging.info(f"User info: {info}")
+    return info
+
+
+def info_search(user_name: str, selected_date: str, request: gr.Request):
+    logging.info(f"Search images for user: {user_name}, date: {selected_date}")
+
+    msg_info = "请输入邮箱."
+    template = template = gr.Dropdown([], label="选择日期", interactive=True, visible=False, value=None)
+
+    if user_name == "":
+        gr.Warning(msg_info, title="错误", duration=2)
+        return [], "", template
+
     try:
-        gr.Info("正在查询中...请勿重复点击")
-        s3_client = S3_Client()
-        res = s3_client.list_objects(user_name)
-        return res
+        msg_info = f"正在查询 {user_name} 的拼图结果"
+        gr.Info(msg_info, title="查询", duration=2)
+        res = s3client.list_objects(user_name)
+
+        ## no result
+        if len(res) == 0:
+            logging.info(f"No images found. User: {user_name}")
+            template = gr.Dropdown([], label="选择日期", interactive=True, visible=False, value=None)
+            res.append(s3client.no_image)
+
+        else:
+            # filter images which are not in the selected date
+            filtered_res = {}
+
+            logging.debug(f"Selected date: {selected_date}")
+
+            date_list = [img_url.split('/')[-2] for img_url in res]
+            date_list = list(set(date_list))
+            date_list.sort(reverse=True)
+
+            selected_date = date_list[0] if selected_date is None else selected_date
+            template = gr.Dropdown(date_list, label="选择日期", interactive=True, visible=True, value=selected_date)
+
+            # filter images by date
+            for img_url in res:
+                url_date = img_url.split('/')[-2]
+                if url_date == selected_date:
+                    filtered_res[img_url] = selected_date
+
+            logging.debug(f"Filtered images: {filtered_res}")
+            logging.debug(f"Filtered images by date: {selected_date} - {list(filtered_res.keys())}")
+            res = list(filtered_res.keys())
+
+        return res, "查询完成", template
+
     except Exception as e:
         logging.error(f"Failed to search images: {str(e)}")
-        gr.Error("查询失败，请稍后重试")
-        return []
+        msg_info = f"查询失败，请稍后重试"
+        gr.Warning(msg_info)
+        
+    return [], msg_info, template
 
 
-def process_video(files: list, user_name: str, progress=gr.Progress()):
-    results = []
-    info_text = "没有视频文件"
+def process_video(files: list, user_name: str, request: gr.Request, progress=gr.Progress()):
+    if not user_name:
+        gr.Warning("请输入邮箱!", title="错误", duration=2)
+        return [], "请输入邮箱"
 
     if not files:
-        return results, info_text
+        return [], "没有视频文件"
 
-    s3client = S3_Client()
-    nn_model = NN_Model()
+    results = []
+    total = len(files)
+
+    progress(0.05, desc="开始处理视频...")
 
     for idx, file_path in enumerate(files):
-        info_text = f"开始处理视频 {idx + 1}/{len(files)}"
-        progress(idx / len(files), desc=info_text)
-        pano = None
+        progress_pct = idx / total
+        info_text = f"处理视频 {idx + 1}/{total}"
+        progress(progress_pct, desc=info_text)
 
         try:
-            # is pano already exists, return url
-            url = s3client.get_url(user_name, s3client.get_md5(file_path))
-            if url != "":
-                logging.info(f"File {file_path} already exists.")
-                pano = url
+            # Check if result already exists
+            file_md5 = s3client.get_md5(file_path)
+            existing_url = s3client.get_url(user_name, file_md5)
+
+            if existing_url:
+                logging.info(f"Using existing result for {file_path}")
+                results.append(existing_url)
+                continue
+
+            # Process new video
+            pano = ml_stitch_im_video(file_path, nn_model)
+            if pano is not None:
+                image_url = s3client.upload_npimg(pano, user_name, file_md5)
+                results.append(image_url)
             else:
-                # stitch video
-                pano = ml_stitch_im_video(file_path, nn_model)
-                s3client.upload_npimg(pano, user_name, s3client.get_md5(file_path))
+                raise Exception("Stitching failed")
 
         except Exception as e:
-            logging.error(f"Failed to process video {file_path}: {str(e)}")
-            gr.Error(f"视频 {file_path} 处理失败: {str(e)}")
+            logging.error(f"Error processing {file_path}: {str(e)}")
+            gr.Warning(f"视频处理失败: {os.path.basename(file_path)}")
+            continue
 
-        results.append(pano)
-        info_text = f"视频 {idx + 1}/{len(files)} 处理完成"
-        progress((idx + 1) / len(files), desc=info_text)
         yield results, info_text
-    
-    info_text = f"共计 {len(files)} 个视频处理完成"
-    progress(1, desc=info_text)
-    gr.Info(info_text)
+
+    final_text = f"已完成 {len(results)}/{total} 个视频处理"
+    progress(1.0, desc=final_text)
+    gr.Info(final_text, title="完成", duration=2)
+    browser_info = get_user_info(request)
+    s3client.meta_data.update({
+        'user_name': user_name,
+        'image_url': results,
+        **browser_info,
+    })
+    s3client.upload_metadata(user_name)
+
     yield results, "拼图完成！"
-    # return results, info_text
 
 
-def upload_with_progress(files: list, user_name: str, progress=gr.Progress()):
-    """处理文件上传并实时更新进度的异步生成器"""
+def upload_video(files: list, user_name: str, progress=gr.Progress()):
+    if user_name == "":
+        gr.Warning("请输入邮箱", title="错误", duration=2)
+        return [], "请输入邮箱"
+
     if not files:
         yield [], "没有视频文件"
 
-    s3client = S3_Client()
-
-    results = []  # 存储处理后的图像结果
+    results = []
     total = len(files)
     completed = 0
     info_update = "等待上传..."
@@ -265,52 +458,81 @@ def upload_with_progress(files: list, user_name: str, progress=gr.Progress()):
         info_text = f"开始上传视频 {idx + 1}/{len(files)}"
         progress(idx / len(files), desc=info_text)
 
-        s3client.upload_file(file_path, user_name)
+        video_url = s3client.upload_file(file_path, user_name)
         completed += 1
+        results.append(video_url)
+
         info_update = f"上传进度 {completed}/{total}"
         progress(completed / total, desc=info_update)
-        yield results, info_update
+        yield [], info_update
 
     info_update = f"上传完成！共上传 {total} 个文件"
     progress(1, desc=info_update)
-    gr.Info(info_update)
+    gr.Info(info_update, title="完成", duration=2)
 
-    return results, info_update
+    s3client.meta_data.update({
+        'user_name': user_name,
+        'video_url': results,
+        'video_res': [s3client.get_video_info(file_path) for file_path in files],
+    })
 
+    yield [], info_update
+    return [], info_update
+
+
+nn_model = NN_Model()
+s3client = S3_Client()
+meta_data = MetaData()
 
 ####### INTERFACE #######
 with gr.Blocks(
-    title="Stitch v2 Demo",
+    title="拼图数据采集",
 ) as demo:
     gr.Markdown("# 拼图数据采集")
-    gr.Markdown("开始采集之前，请阅读 [数据采集指南](https://clobotics.atlassian.net/wiki/pages/resumedraft.action?draftId=1199439906)")
-    gr.Markdown("点击下面的按钮上传视频，支持 `.mp4, .mov` 视频格式。数据上传成功后，系统会自动进行拼图。")
-    gr.Markdown("拼图需要一些时间，无需拼图结果待视频上传成功后关闭页面，之后根据用户名查看。")
-    # gr.Markdown(f"你的用户名: `{get_random_name()}`, 请妥善保存用户名以便查看拼图结果。")
+    gr.Markdown("采集前阅读 [数据采集指南](https://clobotics.atlassian.net/wiki/pages/resumedraft.action?draftId=1199439906)")
+    gr.Markdown("仅支持 `.mp4, .mov` 视频格式。待视频上传成功后可关闭该页面，之后根据邮箱名查看拼图结果。")
 
     with gr.Row():
         with gr.Column(scale=1, min_width=400):
-            user_name = gr.Textbox(label="用户名", value=get_random_name())
-            btn_search = gr.Button(value="查看结果")
-            file_input = gr.File(label="选择文件", file_count="multiple")
+            with gr.Row():
+                user_name   = gr.Textbox(label="邮箱", placeholder="用户名", scale=1)
+                domain      = gr.Textbox(
+                    label="‎",
+                    value="@clobotics.com",
+                    interactive=False,
+                    scale=1,)
+
+            btn_search  = gr.Button(value="查看结果")
+            file_input  = gr.File(label="选择文件", file_count="multiple")
 
         with gr.Column(scale=2):
-            upload_progress = gr.Textbox(label="上传进度", value="等待上传...")
-            gallery = gr.Gallery(label="上传结果", preview=True)
+            prg_info    = gr.Textbox(label="进度", value="等待上传...")
+            dw_date     = gr.Dropdown([], label="选择日期", interactive=True, visible=False)
+            gallery     = gr.Gallery(label="上传结果", preview=True)
 
     file_input.upload(
-        fn=upload_with_progress,
+        fn=upload_video,
         inputs=[file_input, user_name],
-        outputs=[gallery, upload_progress],
+        outputs=[gallery, prg_info],
     ).then(
         fn=process_video,
         inputs=[file_input, user_name],
-        outputs=[gallery, upload_progress],
+        outputs=[gallery, prg_info],
     )
     # search button
-    btn_search.click(fn=info_search, inputs=user_name, outputs=gallery)
+    btn_search.click(
+        fn=info_search,
+        inputs=[user_name, dw_date],
+        outputs=[gallery, prg_info, dw_date],
+    )
+    # date dropdown
+    dw_date.select(
+        fn=info_search,
+        inputs=[user_name, dw_date],
+        outputs=[gallery, prg_info, dw_date],
+    )
 
 
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(share=True, server_name="0.0.0.0", server_port=8081)
+    demo.launch(share=True, server_name="0.0.0.0", server_port=8080)
