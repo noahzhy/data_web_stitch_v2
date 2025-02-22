@@ -223,6 +223,7 @@ class S3_Client:
                 logging.info(f"File already exists: {key}")
                 return f"{self.end_point}/{key}"
 
+            logging.info(f"Uploading file: {file_path} to {key}")
             # Upload file
             response = self.client.upload_file(
                 Bucket=self.bucket,
@@ -230,7 +231,7 @@ class S3_Client:
                 Key=key,
                 PartSize=1,
                 MAXThread=10,
-                EnableMD5=False
+                EnableMD5=False,
             )
 
             if 'ETag' in response:
@@ -260,7 +261,6 @@ class S3_Client:
             for content in response['Contents']:
                 if content['Key'].endswith(('.png', '.jpg', '.jpeg', '.webp')):
                     last_modified = content['LastModified'] # 2025-02-19T09:19:14.000Z
-                    # convert to timestamp
                     last_modified = time.mktime(time.strptime(last_modified, "%Y-%m-%dT%H:%M:%S.000Z"))
                     im_dict[content['Key']] = last_modified
 
@@ -305,7 +305,7 @@ class S3_Client:
 
     @staticmethod
     def is_video(video_path: str):
-        return video_path.endswith(('.mp4', '.mov'))
+        return video_path.lower().strip().endswith(('.mp4', '.mov'))
 
     @staticmethod
     def get_timestamp():
@@ -392,6 +392,11 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
     progress(0.05, desc="开始处理视频...")
 
     for idx, file_path in enumerate(files):
+        if not s3client.is_video(file_path):
+            logging.warning(f"Invalid video format: {file_path}")
+            gr.Warning(f"无效视频格式: {os.path.basename(file_path)}")
+            continue
+
         progress_pct = idx / total
         info_text = f"处理视频 {idx + 1}/{total}"
         progress(progress_pct, desc=info_text)
