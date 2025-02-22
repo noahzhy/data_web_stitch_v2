@@ -1,7 +1,4 @@
 import io, sys, os, time, random, logging, json
-from dataclasses import dataclass
-from datetime import datetime
-import asyncio
 from hashlib import md5
 from typing import Union, List, Tuple, Dict, Any
 
@@ -9,10 +6,8 @@ import cv2
 import numpy as np
 import gradio as gr
 from user_agents import parse
-
 from qcloud_cos import CosConfig
 from qcloud_cos import CosS3Client
-
 
 from app.stitching_v2.lib.stitch import ml_stitch_im_video
 from app.stitching_v2.lib.nn import ExtrMatcher, OrtMatcher, OrtFeatureExtractor
@@ -37,8 +32,6 @@ meta_data = {
     'os':                   '',
     #### DATETIME
     'datetime':             '',
-    #### MD5
-    'md5':                  '',
     #### VIDEO
     'video_url':            [],
     'video_res':            [],
@@ -67,7 +60,6 @@ meta_data = {
     'user_rate':            '',                                     # user rate, check if the image is useful
 }
 
-# dataclass MetaData, init via given dict
 class MetaData:
     def __init__(self, data=meta_data):
         for key, value in data.items():
@@ -144,18 +136,14 @@ class S3_Client:
 
     def upload_metadata(self, user_name: str):
         meta_data = self.meta_data
-        md5_key = meta_data.get('md5')
-        if md5_key == '':
-            logging.error("MD5 key is missing.")
-            md5_key = "{}_{}".format(user_name, self.get_timestamp())
+        timestamp = "{}_{}".format(user_name, self.get_timestamp())
 
         meta_data.update({
-            'md5': md5_key,
             'user_name': user_name,
             'datetime': self.get_timestamp(),
         })
 
-        key = f"{self.json_prefix}/{md5_key}.json"
+        key = f"{self.json_prefix}/{timestamp}.json"
         response = self.client.put_object(
             Bucket=self.bucket,
             Body=meta_data.to_json(),
@@ -402,11 +390,13 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
 
         info_text = f"处理视频 {idx + 1}/{total}"
         progress((idx / total), desc=info_text)
+        logging.info(f"Processing video: {file_path}")
 
         try:
             # Check if result already exists
             file_md5 = s3client.get_md5(file_path)
             existing_url = s3client.get_url(user_name, file_md5)
+            logging.info(f"Existing URL: {existing_url}, md5: {file_md5}")
 
             if existing_url:
                 logging.info(f"Using existing result for {file_path}")
@@ -433,12 +423,12 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
     progress(1.0, desc=final_text)
     gr.Info(final_text)
 
-    s3client.meta_data.update({
-        'user_name': user_name,
-        'image_url': results,
-        **get_user_info(request),
-    })
-    s3client.upload_metadata(user_name)
+    if len(results) > 0:
+        s3client.meta_data.update({
+            'image_url': results,
+            **get_user_info(request),
+        })
+        s3client.upload_metadata(user_name)
 
     yield results, "拼图完成！"
 
