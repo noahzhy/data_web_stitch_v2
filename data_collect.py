@@ -313,15 +313,23 @@ class S3_Client:
 
 
 def get_user_info(request: gr.Request):
-    user_agent = request.headers.get("User-Agent")
-    user_agent_info = parse(user_agent)
-    info = {
-        "browser": user_agent_info.browser.family,
-        "device": user_agent_info.device.family,
-        "os": user_agent_info.os.family,
-    }
-    logging.info(f"User info: {info}")
-    return info
+    try:
+        user_agent = request.headers.get("User-Agent")
+        user_agent_info = parse(user_agent)
+        info = {
+            "browser": user_agent_info.browser.family,
+            "device": user_agent_info.device.family,
+            "os": user_agent_info.os.family,
+        }
+        logging.info(f"User info: {info}")
+        return info
+    except Exception as e:
+        logging.error(f"Failed to get user info: {str(e)}")
+        return {
+            "browser": "unknown",
+            "device": "unknown", 
+            "os": "unknown"
+        }
 
 
 def info_search(user_name: str, selected_date: str, request: gr.Request):
@@ -397,9 +405,8 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
             gr.Warning(f"无效视频格式: {os.path.basename(file_path)}")
             continue
 
-        progress_pct = idx / total
         info_text = f"处理视频 {idx + 1}/{total}"
-        progress(progress_pct, desc=info_text)
+        progress((idx / total), desc=info_text)
 
         try:
             # Check if result already exists
@@ -417,6 +424,7 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
                 image_url = s3client.upload_npimg(pano, user_name, file_md5)
                 results.append(image_url)
             else:
+                logging.error(f"Stitching failed for {file_path}")
                 raise Exception("Stitching failed")
 
         except Exception as e:
@@ -429,11 +437,11 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
     final_text = f"已完成 {len(results)}/{total} 个视频处理"
     progress(1.0, desc=final_text)
     gr.Info(final_text)
-    browser_info = get_user_info(request)
+
     s3client.meta_data.update({
         'user_name': user_name,
         'image_url': results,
-        **browser_info,
+        **get_user_info(request),
     })
     s3client.upload_metadata(user_name)
 
@@ -477,7 +485,6 @@ def upload_video(files: list, user_name: str, progress=gr.Progress()):
     })
 
     yield [], info_update
-    return [], info_update
 
 
 nn_model = NN_Model()
