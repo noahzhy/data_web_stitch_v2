@@ -474,15 +474,21 @@ def upload_video(files: list, user_name: str, progress=gr.Progress()):
         progress(completed / total, desc=info_update)
         yield [], info_update
 
-    info_update = f"上传完成！共上传 {completed} 个文件"
-    progress(1, desc=info_update)
-    gr.Info(info_update)
+    if completed > 0:
+        info_update = f"上传完成！共上传 {completed} 个文件"
+        progress(1, desc=info_update)
+        gr.Info(info_update)
 
-    s3client.meta_data.update({
-        'user_name': user_name,
-        'video_url': results,
-        'video_res': [s3client.get_video_info(file_path) for file_path in files],
-    })
+        s3client.meta_data.update({
+            'user_name': user_name,
+            'video_url': results,
+            'video_res': [s3client.get_video_info(file_path) for file_path in files],
+        })
+
+    else:
+        info_update = "没有有效视频文件"
+        progress(1, desc=info_update)
+        gr.Warning(info_update)
 
     yield [], info_update
 
