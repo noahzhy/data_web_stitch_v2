@@ -208,10 +208,6 @@ class S3_Client:
             logging.error(f"File not found: {file_path}")
             return ""
 
-        if not self.is_video(file_path):
-            logging.error(f"Invalid video format: {file_path}")
-            return ""
-
         try:
             # Generate key path
             md5_key = md5_key or self.get_md5(file_path)
@@ -402,7 +398,6 @@ def process_video(files: list, user_name: str, request: gr.Request, progress=gr.
     for idx, file_path in enumerate(files):
         if not s3client.is_video(file_path):
             logging.warning(f"Invalid video format: {file_path}")
-            gr.Warning(f"无效视频格式: {os.path.basename(file_path)}")
             continue
 
         info_text = f"处理视频 {idx + 1}/{total}"
@@ -466,15 +461,20 @@ def upload_video(files: list, user_name: str, progress=gr.Progress()):
         info_text = f"开始上传视频 {idx + 1}/{len(files)}"
         progress(idx / len(files), desc=info_text)
 
-        video_url = s3client.upload_file(file_path, user_name)
-        completed += 1
-        results.append(video_url)
+        if s3client.is_video(file_path):
+            video_url = s3client.upload_file(file_path, user_name)
+            completed += 1
+            results.append(video_url)
+        else:
+            logging.warning(f"Invalid video format: {file_path}")
+            gr.Warning(f"无效视频格式: {os.path.basename(file_path)}")
+            continue
 
         info_update = f"上传进度 {completed}/{total}"
         progress(completed / total, desc=info_update)
         yield [], info_update
 
-    info_update = f"上传完成！共上传 {total} 个文件"
+    info_update = f"上传完成！共上传 {completed} 个文件"
     progress(1, desc=info_update)
     gr.Info(info_update)
 
